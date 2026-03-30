@@ -1,0 +1,11 @@
+{
+  "name": "sdcoh",
+  "description": "Story Design Coherence — manage dependency graphs between story design documents",
+  "plugins": [
+    {
+      "name": "sdcoh",
+      "description": "Dependency graph management for story design documents",
+      "skills_dir": "skills"
+    }
+  ]
+}
