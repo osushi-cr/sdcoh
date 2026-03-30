@@ -1,2 +1,0 @@
-[console_scripts]
-sdcoh = sdcoh.cli:cli
