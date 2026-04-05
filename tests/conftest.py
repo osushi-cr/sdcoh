@@ -5,140 +5,66 @@ from pathlib import Path
 
 @pytest.fixture
 def sample_project(tmp_path: Path) -> Path:
-    """Create a minimal novel project with frontmatter."""
-    # sdcoh.yml
+    """Create a minimal novel project with rules (no frontmatter)."""
     (tmp_path / "sdcoh.yml").write_text(
         "project:\n"
         '  name: "Test Novel"\n'
         "scan:\n"
-        "  - design/\n"
-        "  - drafts/\n"
-        "  - briefs/\n"
+        '  - { path: "design/",  type: "design" }\n'
+        '  - { path: "drafts/",  type: "episode" }\n'
+        '  - { path: "briefs/",  type: "brief" }\n'
+        "rules:\n"
+        '  - name: "design informs episodes"\n'
+        '    from: "design/*.md"\n'
+        '    to: "drafts/ep*.md"\n'
+        '    relation: informs\n'
+        '  - name: "brief feeds episode"\n'
+        '    from: "briefs/{ep}-brief.md"\n'
+        '    to: "drafts/{ep}.md"\n'
+        '    relation: feeds\n'
     )
 
-    # design docs
     design = tmp_path / "design"
     design.mkdir()
+    (design / "characters.md").write_text("# Characters\n")
+    (design / "beat-sheet.md").write_text("# Beat Sheet\n")
+    (design / "style.md").write_text("# Style\n")
 
-    (design / "characters.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "design:characters"\n'
-        "---\n"
-        "# Characters\n"
-    )
-
-    (design / "beat-sheet.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "design:beat-sheet"\n'
-        "  depends_on:\n"
-        '    - id: "design:characters"\n'
-        '      relation: derives_from\n'
-        "---\n"
-        "# Beat Sheet\n"
-    )
-
-    (design / "style.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "design:style"\n'
-        "---\n"
-        "# Style\n"
-    )
-
-    (design / "no-frontmatter.md").write_text("# No frontmatter\n")
-
-    # drafts
     drafts = tmp_path / "drafts"
     drafts.mkdir()
+    (drafts / "ep01.md").write_text("# Episode 1\n")
 
-    (drafts / "ep01.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "episode:ep01"\n'
-        "  depends_on:\n"
-        '    - id: "design:beat-sheet"\n'
-        '      relation: implements\n'
-        '    - id: "design:style"\n'
-        '      relation: constrained_by\n'
-        "  updates:\n"
-        '    - id: "design:characters"\n'
-        '      relation: triggers_update\n'
-        "---\n"
-        "# Episode 1\n"
-    )
-
-    # briefs
     briefs = tmp_path / "briefs"
     briefs.mkdir()
-
-    (briefs / "ep01-brief.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "brief:ep01"\n'
-        "  depends_on:\n"
-        '    - id: "design:beat-sheet"\n'
-        '      relation: derives_from\n'
-        '    - id: "design:characters"\n'
-        '      relation: references\n'
-        "---\n"
-        "# Brief ep01\n"
-    )
+    (briefs / "ep01-brief.md").write_text("# Brief ep01\n")
 
     return tmp_path
 
 
 @pytest.fixture
 def glob_project(tmp_path: Path) -> Path:
-    """Project where dependencies use glob patterns."""
+    """Project where a rule fans out from one design to many episodes."""
     (tmp_path / "sdcoh.yml").write_text(
         "project:\n"
         '  name: "Glob Test"\n'
         "scan:\n"
-        "  - design/\n"
-        "  - drafts/\n"
+        '  - { path: "design/", type: "design" }\n'
+        '  - { path: "drafts/", type: "episode" }\n'
+        "rules:\n"
+        '  - name: "design informs all episodes"\n'
+        '    from: "design/*.md"\n'
+        '    to: "drafts/ep*.md"\n'
+        '    relation: informs\n'
     )
 
     design = tmp_path / "design"
     design.mkdir()
-
-    (design / "characters.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "design:characters"\n'
-        "---\n"
-        "# Characters\n"
-    )
-
-    (design / "beat-sheet.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "design:beat-sheet"\n'
-        "---\n"
-        "# Beat Sheet\n"
-    )
-
-    (design / "style.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "design:style"\n'
-        "---\n"
-        "# Style\n"
-    )
+    (design / "characters.md").write_text("# Characters\n")
+    (design / "beat-sheet.md").write_text("# Beat Sheet\n")
+    (design / "style.md").write_text("# Style\n")
 
     drafts = tmp_path / "drafts"
     drafts.mkdir()
-
-    (drafts / "ep01.md").write_text(
-        "---\n"
-        "sdcoh:\n"
-        '  id: "episode:ep01"\n'
-        "  depends_on:\n"
-        '    - id: "design:*"\n'
-        '      relation: implements\n'
-        "---\n"
-        "# Episode 1\n"
-    )
+    (drafts / "ep01.md").write_text("# Episode 1\n")
 
     return tmp_path

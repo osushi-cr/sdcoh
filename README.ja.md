@@ -58,22 +58,24 @@ sdcoh init --name "私の小説" --alias my-novel
 
 `sdcoh.yml` と `.sdcoh/` ディレクトリが作成される。
 
-### 2. 設計書にフロントマターを追加
+### 2. `sdcoh.yml` に依存ルールを宣言
 
-各Markdownファイルの先頭にYAMLフロントマターで依存関係を宣言する:
+v0.2から、依存関係は `sdcoh.yml` の `rules:` にパターンで宣言する。**Markdownファイル側のフロントマターは不要**。
 
 ```yaml
----
-sdcoh:
-  id: "design:beat-sheet"
-  depends_on:
-    - id: "design:characters"
-      relation: derives_from
----
+rules:
+  - name: "design informs episodes"
+    from: "design/*.md"
+    to: "drafts/ep*.md"
+    relation: informs
 
-# ビートシート
-...
+  - name: "brief feeds episode"
+    from: "briefs/{ep}-brief.md"
+    to: "drafts/{ep}.md"
+    relation: feeds
 ```
+
+エッジの意味: `from → to` は **「from が変わると to が陳腐化する」**。
 
 ### 3. スキャンしてチェック
 
@@ -103,14 +105,12 @@ project:
   name: "私の小説"
   alias: "my-novel"
 
-# スキャン対象ディレクトリ
+# スキャン対象ディレクトリ（各エントリにnode typeを指定）
 scan:
-  - design/
-  - drafts/
-  - briefs/
-  - reviews/
-  - research/
-  - docs/
+  - { path: "design/",  type: "design" }
+  - { path: "drafts/",  type: "episode" }
+  - { path: "briefs/",  type: "brief" }
+  - { path: "reviews/", type: "review" }
 
 # ノード種別（layerが小さいほど上流）
 node_types:
@@ -120,12 +120,25 @@ node_types:
   episode:  { layer: 2 }
   review:   { layer: 3 }   # 最下流
 
+# 依存ルール: from が変わると to が陳腐化する
+rules:
+  - name: "design informs episodes"
+    from: "design/*.md"
+    to: "drafts/ep*.md"
+    relation: informs
+  - name: "brief feeds episode"
+    from: "briefs/{ep}-brief.md"
+    to: "drafts/{ep}.md"
+    relation: feeds
+
 # OpenViking連携（オプション）
 openviking:
   enabled: false
   endpoint: "http://localhost:1933"
   auto_register: true
 ```
+
+Node IDは `{type}:{basename}` で自動生成される（例: `design/characters.md` → `design:characters`）。
 
 ## デフォルトのディレクトリ構成
 
@@ -140,87 +153,70 @@ novel-project/
 └── docs/            # ワークフロー文書
 ```
 
-## フロントマター仕様
+## ルール構文
 
-### フィールド
+### パターントークン
 
-| フィールド | 必須 | 説明 |
-|-----------|------|------|
-| `id` | Yes | ノードID。`{種別}:{名前}` 形式 |
-| `depends_on` | No | 上流依存。相手が変わったら自分に影響がある |
-| `updates` | No | 下流更新。自分が変わったら相手の更新が必要 |
+| トークン | 意味 |
+|---------|------|
+| `*` | 任意文字列（`/` を含まない） |
+| `?` | 1文字（`/` を含まない） |
+| `{name}` | 名前付きキャプチャ（非貪欲、`/` を含まない）。`from` で抽出 → `to` に代入 |
+| リテラル | そのままマッチ（正規表現メタ文字はエスケープ） |
 
-### 依存関係の種類（relation）
+### 例
 
-| relation | 意味 | 例 |
-|----------|------|-----|
-| `derives_from` | この設計書から導出した | ビートシート ← キャラシート |
-| `implements` | この設計を原稿で実装した | 原稿 ← ビートシート |
-| `constrained_by` | このルールに従う | 原稿 ← 文体定義 |
-| `references` | 参照している | ブリーフ ← 伏線台帳 |
-| `extracts_from` | ここから抽出した | 表現ログ ← 原稿 |
-| `triggers_update` | 変更されたら更新が必要 | Continuity ← 原稿 |
-
-### Globパターン
-
-fnmatch形式のglobパターンで、複数ノードへの依存を一括宣言できる:
-
+**Fan-out** — 1つのファイルから多数へ:
 ```yaml
-# design/characters.md — 変更時に全episode・brief・voiceカードへ波及
-sdcoh:
-  id: "design:characters"
-  updates:
-    - id: "episode:*"
-      relation: triggers_update
-    - id: "brief:*"
-      relation: triggers_update
-    - id: "design:voice-*"
-      relation: triggers_update
+- name: "design informs all episodes"
+  from: "design/*.md"
+  to: "drafts/ep*.md"
+  relation: informs
 ```
 
-パターンはスキャン時に展開され、`graph.json`には具体的なエッジのみ保存される。対応構文: `*`（任意文字列）、`?`（1文字）、`[seq]`（文字集合）。
-
-設計書側でまとめて宣言することで、原稿やブリーフのフロントマターを最小限にできる:
-
+**1対1ペアリング** — 共通キャプチャで紐付け:
 ```yaml
-# drafts/ep05.md — 例外的な依存だけ書けばOK
-sdcoh:
-  id: "episode:ep05"
-  depends_on:
-    - id: "design:foreshadow-ledger"
-      relation: references
+- name: "brief feeds episode"
+  from: "briefs/{ep}-brief.md"
+  to: "drafts/{ep}.md"
+  relation: feeds
+# briefs/ep01-brief.md → drafts/ep01.md
 ```
 
-0件マッチのglobパターンは `sdcoh scan` 時にwarningが出る。
-
-### 双方向依存
-
-一部の関係は双方向。`depends_on`（上流）と `updates`（下流）を組み合わせて表現する:
-
+**バージョン違いも拾う** — キャプチャ後の任意サフィックス:
 ```yaml
-# 原稿から表現ログへの抽出
-# drafts/ep01.md
-sdcoh:
-  id: "episode:ep01"
-  updates:
-    - id: "design:expression-log"
-      relation: extracts_from
-
-# 表現ログはブリーフが参照する（重複回避）
-# design/expression-log.md
-sdcoh:
-  id: "design:expression-log"
-  depends_on:
-    - id: "episode:ep01"
-      relation: extracts_from
+- name: "any brief revision feeds episode"
+  from: "briefs/{ep}-*.md"
+  to: "drafts/{ep}.md"
+  relation: feeds
+# briefs/ep01-kubota-brief.md → drafts/ep01.md
+# briefs/ep01-revision2-brief.md → drafts/ep01.md
 ```
+
+**逆方向** — エピソードが表現ログを更新する:
+```yaml
+- name: "episode updates expression log"
+  from: "drafts/ep*.md"
+  to: "design/expression-log.md"
+  relation: extracts_from
+```
+
+### 検証
+
+scan時に以下を自動検出する:
+
+- **Node ID衝突** — 別サブディレクトリの同名ファイルで `{type}:{basename}` が重複
+- **未定義プレースホルダ** — `to: "drafts/{missing}.md"` で `from` に `{missing}` キャプチャがない
+- **relation衝突** — 同じ `(source, target)` に異なる relation を出すルールが存在
+- **自己ループ** — from/to 両方にマッチするファイルは除外
+- **0件マッチ** — エッジを1本も作らないルールに warning
 
 ## CLIリファレンス
 
 | コマンド | 説明 |
 |---------|------|
 | `sdcoh init` | プロジェクト初期化（`sdcoh.yml` + `.sdcoh/`） |
-| `sdcoh scan` | フロントマター解析 → 依存グラフ構築 |
+| `sdcoh scan` | ルール適用 → 依存グラフ構築 |
 | `sdcoh impact <path>` | 指定ファイルの変更が何に影響するか |
 | `sdcoh graph` | 依存ツリーを表示 |
 | `sdcoh validate` | 壊れた参照・循環依存・孤立ノードを検出 |
@@ -230,7 +226,7 @@ sdcoh:
 
 ```
 sdcoh scan --quiet          # 最小出力（hook用）
-sdcoh scan --warn           # フロントマターなしファイルを一覧表示
+sdcoh scan --warn           # エッジを作らなかったルールを一覧表示
 sdcoh impact <path> --depth N  # 走査深度を制限
 sdcoh status --warn-only    # 警告がある場合のみ出力
 sdcoh status --json         # JSON形式で出力

@@ -7,23 +7,20 @@ from collections import defaultdict
 from sdcoh.scanner import ScanResult
 
 
-def _build_reverse_adj(result: ScanResult) -> dict[str, list[dict]]:
-    """Build reverse adjacency: target → list of edges where source depends on target."""
-    rev: dict[str, list[dict]] = defaultdict(list)
-    for edge in result.edges:
-        if edge["direction"] == "depends_on":
-            # source depends on target → if target changes, source is impacted
-            rev[edge["target"]].append(edge)
-    return rev
-
-
-def _build_update_adj(result: ScanResult) -> dict[str, list[dict]]:
-    """Build update adjacency: source → list of update edges."""
+def _build_forward_adj(result: ScanResult) -> dict[str, list[dict]]:
+    """Build forward adjacency: source → list of outgoing edges."""
     adj: dict[str, list[dict]] = defaultdict(list)
     for edge in result.edges:
-        if edge["direction"] == "updates":
-            adj[edge["source"]].append(edge)
+        adj[edge["source"]].append(edge)
     return adj
+
+
+def _build_reverse_adj(result: ScanResult) -> dict[str, list[dict]]:
+    """Build reverse adjacency: target → list of incoming edges."""
+    rev: dict[str, list[dict]] = defaultdict(list)
+    for edge in result.edges:
+        rev[edge["target"]].append(edge)
+    return rev
 
 
 def find_impact(
@@ -33,48 +30,38 @@ def find_impact(
 ) -> list[dict]:
     """Find all nodes impacted by a change to node_id.
 
-    Walks reverse depends_on edges (who depends on me?) and update edges.
+    Walks forward edges: if node_id changes, every target reachable from it
+    via source→target edges becomes stale.
     Returns list of dicts with 'id' and 'relation' keys.
     """
     node_ids = {n["id"] for n in result.nodes}
     if node_id not in node_ids:
         return []
 
-    rev = _build_reverse_adj(result)
-    upd = _build_update_adj(result)
+    adj = _build_forward_adj(result)
 
-    visited: set[str] = set()
+    visited: set[str] = {node_id}
     impacted: list[dict] = []
 
     def walk(nid: str, depth: int) -> None:
         if max_depth > 0 and depth > max_depth:
             return
-        # Reverse depends_on: who depends on nid?
-        for edge in rev.get(nid, []):
-            src = edge["source"]
-            if src not in visited:
-                visited.add(src)
-                impacted.append({"id": src, "relation": edge["relation"]})
-                walk(src, depth + 1)
-        # Update edges: what does nid trigger updates to?
-        for edge in upd.get(nid, []):
+        for edge in adj.get(nid, []):
             tgt = edge["target"]
             if tgt not in visited:
                 visited.add(tgt)
                 impacted.append({"id": tgt, "relation": edge["relation"]})
                 walk(tgt, depth + 1)
 
-    visited.add(node_id)
     walk(node_id, 1)
     return impacted
 
 
 def find_cycles(result: ScanResult) -> list[list[str]]:
-    """Detect cycles in depends_on edges using DFS."""
+    """Detect cycles using DFS over forward edges."""
     adj: dict[str, list[str]] = defaultdict(list)
     for edge in result.edges:
-        if edge["direction"] == "depends_on":
-            adj[edge["source"]].append(edge["target"])
+        adj[edge["source"]].append(edge["target"])
 
     all_ids = {n["id"] for n in result.nodes}
     visited: set[str] = set()
@@ -102,7 +89,7 @@ def find_cycles(result: ScanResult) -> list[list[str]]:
 
 
 def find_orphans(result: ScanResult) -> list[str]:
-    """Find nodes that are neither referenced by depends_on nor update edges."""
+    """Find nodes that are not touched by any edge."""
     referenced: set[str] = set()
     for edge in result.edges:
         referenced.add(edge["source"])
@@ -123,17 +110,14 @@ def validate_references(result: ScanResult) -> list[str]:
 
 
 def build_tree_text(result: ScanResult) -> str:
-    """Build a text representation of the dependency tree."""
-    # Find roots: nodes that have no depends_on edges (as source)
-    has_deps: set[str] = set()
+    """Build a text tree from roots (no incoming edges) to leaves."""
+    has_incoming: set[str] = set()
     for edge in result.edges:
-        if edge["direction"] == "depends_on":
-            has_deps.add(edge["source"])
+        has_incoming.add(edge["target"])
 
-    roots = sorted(n["id"] for n in result.nodes if n["id"] not in has_deps)
+    roots = sorted(n["id"] for n in result.nodes if n["id"] not in has_incoming)
 
-    # Build forward adjacency (who depends on me)
-    rev = _build_reverse_adj(result)
+    adj = _build_forward_adj(result)
     lines: list[str] = []
 
     def render(nid: str, prefix: str, is_last: bool, visited: set[str]) -> None:
@@ -147,7 +131,7 @@ def build_tree_text(result: ScanResult) -> str:
             return
         visited.add(nid)
 
-        children = sorted({e["source"] for e in rev.get(nid, [])})
+        children = sorted({e["target"] for e in adj.get(nid, [])})
         child_prefix = prefix + ("   " if is_last else "│  ")
         for i, child in enumerate(children):
             render(child, child_prefix, i == len(children) - 1, visited)

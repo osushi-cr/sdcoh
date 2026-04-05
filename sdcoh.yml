@@ -1,0 +1,18 @@
+project:
+  name: "Test Novel"
+  alias: "test-novel"
+
+scan:
+  - design/
+  - drafts/
+  - briefs/
+  - reviews/
+  - research/
+  - docs/
+
+node_types:
+  research: { layer: -1 }
+  design: { layer: 0 }
+  brief: { layer: 1 }
+  episode: { layer: 2 }
+  review: { layer: 3 }

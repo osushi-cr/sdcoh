@@ -58,22 +58,24 @@ sdcoh init --name "My Novel" --alias my-novel
 
 This creates `sdcoh.yml` and `.sdcoh/` directory.
 
-### 2. Add frontmatter to your documents
+### 2. Declare dependencies in `sdcoh.yml`
 
-Add YAML frontmatter to each Markdown file declaring its dependencies:
+Starting with v0.2, dependencies are declared centrally in `sdcoh.yml` using patterns. **No frontmatter needed in your Markdown files.**
 
 ```yaml
----
-sdcoh:
-  id: "design:beat-sheet"
-  depends_on:
-    - id: "design:characters"
-      relation: derives_from
----
+rules:
+  - name: "design informs episodes"
+    from: "design/*.md"
+    to: "drafts/ep*.md"
+    relation: informs
 
-# Beat Sheet
-...
+  - name: "brief feeds episode"
+    from: "briefs/{ep}-brief.md"
+    to: "drafts/{ep}.md"
+    relation: feeds
 ```
+
+Edge semantic: `from → to` means **"when `from` changes, `to` becomes stale."**
 
 ### 3. Scan and check
 
@@ -103,14 +105,12 @@ project:
   name: "My Novel"
   alias: "my-novel"
 
-# Directories to scan for Markdown files
+# Directories to scan, each with a node type
 scan:
-  - design/
-  - drafts/
-  - briefs/
-  - reviews/
-  - research/
-  - docs/
+  - { path: "design/",  type: "design" }
+  - { path: "drafts/",  type: "episode" }
+  - { path: "briefs/",  type: "brief" }
+  - { path: "reviews/", type: "review" }
 
 # Node types with layer hierarchy (lower = upstream)
 node_types:
@@ -120,12 +120,25 @@ node_types:
   episode:  { layer: 2 }
   review:   { layer: 3 }   # Most downstream
 
+# Dependency rules: when `from` changes, `to` is stale
+rules:
+  - name: "design informs episodes"
+    from: "design/*.md"
+    to: "drafts/ep*.md"
+    relation: informs
+  - name: "brief feeds episode"
+    from: "briefs/{ep}-brief.md"
+    to: "drafts/{ep}.md"
+    relation: feeds
+
 # Optional: OpenViking semantic search integration
 openviking:
   enabled: false
   endpoint: "http://localhost:1933"
   auto_register: true
 ```
+
+Node IDs are auto-generated as `{type}:{basename}` (e.g. `design/characters.md` → `design:characters`).
 
 ## Default Directory Structure
 
@@ -140,87 +153,70 @@ novel-project/
 └── docs/            # Workflow documentation
 ```
 
-## Frontmatter Spec
+## Rule Syntax
 
-### Fields
+### Pattern tokens
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `id` | Yes | Node ID in `{type}:{name}` format |
-| `depends_on` | No | Upstream dependencies (if they change, I'm affected) |
-| `updates` | No | Downstream targets (if I change, they need updating) |
+| Token | Meaning |
+|-------|---------|
+| `*` | Any string (no `/`) |
+| `?` | Single char (no `/`) |
+| `{name}` | Named capture (non-greedy, no `/`) — bind once in `from`, substitute in `to` |
+| literal | Matches exactly (regex metacharacters are escaped) |
 
-### Relation Types
+### Examples
 
-| Relation | Meaning | Example |
-|----------|---------|---------|
-| `derives_from` | Derived from this document | beat sheet ← characters |
-| `implements` | Implements this design | episode ← beat sheet |
-| `constrained_by` | Must follow these rules | episode ← style guide |
-| `references` | References this document | brief ← foreshadowing ledger |
-| `extracts_from` | Extracted from this source | expression log ← episode |
-| `triggers_update` | Change triggers update | continuity ← episode |
-
-### Glob Patterns
-
-Use fnmatch-style glob patterns to declare dependencies on multiple nodes at once:
-
+**Fan-out** — one file to many:
 ```yaml
-# design/characters.md — updates all episodes and briefs when changed
-sdcoh:
-  id: "design:characters"
-  updates:
-    - id: "episode:*"
-      relation: triggers_update
-    - id: "brief:*"
-      relation: triggers_update
-    - id: "design:voice-*"
-      relation: triggers_update
+- name: "design informs all episodes"
+  from: "design/*.md"
+  to: "drafts/ep*.md"
+  relation: informs
 ```
 
-Patterns are expanded at scan time — `graph.json` contains only concrete edges. Supported glob syntax: `*` (any string), `?` (single char), `[seq]` (character set).
-
-This lets you declare dependencies from the design doc side, keeping episode/brief frontmatter minimal:
-
+**1-to-1 pairing** — match by shared capture:
 ```yaml
-# drafts/ep05.md — only exception-specific dependencies needed
-sdcoh:
-  id: "episode:ep05"
-  depends_on:
-    - id: "design:foreshadow-ledger"
-      relation: references
+- name: "brief feeds episode"
+  from: "briefs/{ep}-brief.md"
+  to: "drafts/{ep}.md"
+  relation: feeds
+# briefs/ep01-brief.md → drafts/ep01.md
 ```
 
-A glob pattern that matches zero nodes produces a warning during `sdcoh scan`.
-
-### Bidirectional Dependencies
-
-Some relationships go both ways. Use `depends_on` for upstream and `updates` for downstream:
-
+**Multiple variants** — any suffix after captured prefix:
 ```yaml
-# episode extracts expressions into the log
-# drafts/ep01.md
-sdcoh:
-  id: "episode:ep01"
-  updates:
-    - id: "design:expression-log"
-      relation: extracts_from
-
-# the log is referenced by briefs to avoid repetition
-# design/expression-log.md
-sdcoh:
-  id: "design:expression-log"
-  depends_on:
-    - id: "episode:ep01"
-      relation: extracts_from
+- name: "any brief revision feeds episode"
+  from: "briefs/{ep}-*.md"
+  to: "drafts/{ep}.md"
+  relation: feeds
+# briefs/ep01-kubota-brief.md → drafts/ep01.md
+# briefs/ep01-revision2-brief.md → drafts/ep01.md
 ```
+
+**Reverse flow** — episodes update review logs:
+```yaml
+- name: "episode updates expression log"
+  from: "drafts/ep*.md"
+  to: "design/expression-log.md"
+  relation: extracts_from
+```
+
+### Validation
+
+sdcoh catches common mistakes at scan time:
+
+- **Node ID collision** — two files producing the same `{type}:{basename}` (e.g. from nested subdirectories)
+- **Undefined placeholder** — `to: "drafts/{missing}.md"` when `from` has no `{missing}` capture
+- **Relation conflict** — two rules producing the same edge with different relations
+- **Self-loop** — a file matching both sides is silently excluded
+- **Zero matches** — a rule that produces no edges warns during `sdcoh scan`
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `sdcoh init` | Initialize project (`sdcoh.yml` + `.sdcoh/`) |
-| `sdcoh scan` | Parse frontmatter, build dependency graph |
+| `sdcoh scan` | Apply rules, build dependency graph |
 | `sdcoh impact <path>` | Show what's affected by changing a file |
 | `sdcoh graph` | Display dependency tree |
 | `sdcoh validate` | Check for broken refs, cycles, orphans |
@@ -230,7 +226,7 @@ sdcoh:
 
 ```
 sdcoh scan --quiet          # Minimal output (for hooks)
-sdcoh scan --warn           # List files without frontmatter
+sdcoh scan --warn           # List rules that produced no edges
 sdcoh impact <path> --depth N  # Limit traversal depth
 sdcoh status --warn-only    # Only output if warnings exist
 sdcoh status --json         # JSON output

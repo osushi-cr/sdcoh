@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from sdcoh.config import load_config, ConfigNotFoundError
-from sdcoh.scanner import scan_project, ScanResult
+from sdcoh.scanner import scan_project, ScanResult, GRAPH_VERSION
 from sdcoh.graph import (
     find_impact,
     find_cycles,
@@ -23,20 +23,21 @@ def _resolve_root(path: str | None) -> Path:
 
 
 def _load_graph(root: Path) -> ScanResult:
-    """Load previously saved graph, or scan fresh."""
+    """Load previously saved graph, or scan fresh. Invalidates on version mismatch."""
     import json
 
     graph_path = root / ".sdcoh" / "graph.json"
-    if not graph_path.exists():
-        cfg = load_config(root)
-        result = scan_project(cfg)
-        result.save(root)
-        return result
+    if graph_path.exists():
+        data = json.loads(graph_path.read_text(encoding="utf-8"))
+        if data.get("version") == GRAPH_VERSION:
+            result = ScanResult()
+            result.nodes = data.get("nodes", [])
+            result.edges = data.get("edges", [])
+            return result
 
-    data = json.loads(graph_path.read_text(encoding="utf-8"))
-    result = ScanResult()
-    result.nodes = data.get("nodes", [])
-    result.edges = data.get("edges", [])
+    cfg = load_config(root)
+    result = scan_project(cfg)
+    result.save(root)
     return result
 
 
@@ -45,7 +46,6 @@ def _node_id_from_path(result: ScanResult, file_path: str) -> str | None:
     for node in result.nodes:
         if node["path"] == file_path:
             return node["id"]
-    # Fallback: suffix match with path separator to avoid ambiguity
     for node in result.nodes:
         if node["path"].endswith("/" + file_path):
             return node["id"]
@@ -75,19 +75,27 @@ def init(name: str, alias: str | None, path: str | None) -> None:
         f'  alias: "{alias}"\n'
         f'\n'
         f'scan:\n'
-        f'  - design/\n'
-        f'  - drafts/\n'
-        f'  - briefs/\n'
-        f'  - reviews/\n'
-        f'  - research/\n'
-        f'  - docs/\n'
+        f'  - {{ path: "design/",  type: "design" }}\n'
+        f'  - {{ path: "drafts/",  type: "episode" }}\n'
+        f'  - {{ path: "briefs/",  type: "brief" }}\n'
+        f'  - {{ path: "reviews/", type: "review" }}\n'
         f'\n'
         f'node_types:\n'
         f'  research: {{ layer: -1 }}\n'
         f'  design: {{ layer: 0 }}\n'
         f'  brief: {{ layer: 1 }}\n'
         f'  episode: {{ layer: 2 }}\n'
-        f'  review: {{ layer: 3 }}\n',
+        f'  review: {{ layer: 3 }}\n'
+        f'\n'
+        f'rules:\n'
+        f'  - name: "design informs episodes"\n'
+        f'    from: "design/*.md"\n'
+        f'    to: "drafts/ep*.md"\n'
+        f'    relation: informs\n'
+        f'  - name: "brief feeds episode"\n'
+        f'    from: "briefs/{{ep}}-brief.md"\n'
+        f'    to: "drafts/{{ep}}.md"\n'
+        f'    relation: feeds\n',
         encoding="utf-8",
     )
     (root / ".sdcoh").mkdir(exist_ok=True)
@@ -98,7 +106,7 @@ def init(name: str, alias: str | None, path: str | None) -> None:
 @cli.command()
 @click.option("--path", default=None, help="Project root directory")
 @click.option("--quiet", is_flag=True, help="Minimal output")
-@click.option("--warn", is_flag=True, help="List files without frontmatter")
+@click.option("--warn", is_flag=True, help="List rules with no matches")
 def scan(path: str | None, quiet: bool, warn: bool) -> None:
     """Scan project and build dependency graph."""
     root = _resolve_root(path)
@@ -108,19 +116,17 @@ def scan(path: str | None, quiet: bool, warn: bool) -> None:
         raise click.ClickException(str(e))
 
     result = scan_project(cfg)
-    graph_path = result.save(root)
+    result.save(root)
 
     if quiet:
         if result.warnings:
-            click.echo(f"⚠️ {len(result.warnings)} files without frontmatter")
+            click.echo(f"⚠️ {len(result.warnings)} rule(s) with no matches")
         return
 
-    click.echo(f"  Scanned: {len(result.nodes) + len(result.warnings)} files, "
-               f"{len(result.nodes)} with frontmatter")
     click.echo(f"  Graph: {len(result.nodes)} nodes, {len(result.edges)} edges")
 
     if result.warnings:
-        click.echo(f"  ⚠️ {len(result.warnings)} files without frontmatter"
+        click.echo(f"  ⚠️ {len(result.warnings)} rule(s) with no matches"
                    + (" (use --warn to list)" if not warn else ""))
         if warn:
             for w in result.warnings:

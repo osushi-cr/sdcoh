@@ -1,16 +1,20 @@
-"""Parse frontmatter from Markdown files and build dependency graph."""
+"""Scan directories and build dependency graph from rules."""
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-import frontmatter
-from fnmatch import fnmatch
+from sdcoh.config import SdcohConfig, Rule
 
-from sdcoh.config import SdcohConfig
+GRAPH_VERSION = "2.0"
+
+
+class ScannerError(RuntimeError):
+    """Raised on scanner configuration/validation errors."""
 
 
 @dataclass
@@ -29,7 +33,7 @@ class ScanResult:
         graph_path.write_text(
             json.dumps(
                 {
-                    "version": "1.0",
+                    "version": GRAPH_VERSION,
                     "scanned_at": datetime.now(timezone.utc).isoformat(),
                     "nodes": self.nodes,
                     "edges": self.edges,
@@ -43,119 +47,147 @@ class ScanResult:
 
 
 def scan_project(cfg: SdcohConfig) -> ScanResult:
-    """Scan all Markdown files in configured directories and build the graph."""
+    """Scan files and build the dependency graph from rules."""
     result = ScanResult()
-    node_ids: set[str] = set()
-    parsed_files: list[tuple[Path, dict]] = []
 
-    # Pass 1: collect all nodes
-    for scan_dir in cfg.scan_dirs:
-        dir_path = cfg.root / scan_dir.rstrip("/")
+    # 1. Collect nodes from scan entries
+    path_to_node: dict[str, dict] = {}
+    id_to_node: dict[str, dict] = {}
+
+    for entry in cfg.scan:
+        dir_path = cfg.root / entry.path.rstrip("/")
         if not dir_path.exists():
             continue
         for md_file in sorted(dir_path.rglob("*.md")):
-            sdcoh_meta = _parse_frontmatter(md_file, cfg.root, result)
-            if sdcoh_meta is None:
-                continue
-            node_id = sdcoh_meta.get("id")
-            if not node_id:
-                rel_path = str(md_file.relative_to(cfg.root))
-                result.warnings.append(rel_path)
-                continue
-            if node_id not in node_ids:
-                node_type = node_id.split(":")[0] if ":" in node_id else "unknown"
-                mtime = datetime.fromtimestamp(
-                    md_file.stat().st_mtime, tz=timezone.utc
-                ).isoformat()
-                result.nodes.append(
-                    {
-                        "id": node_id,
-                        "type": node_type,
-                        "path": str(md_file.relative_to(cfg.root)),
-                        "mtime": mtime,
-                    }
+            basename = md_file.stem
+            node_id = f"{entry.type}:{basename}"
+            rel_path = str(md_file.relative_to(cfg.root))
+            if node_id in id_to_node:
+                existing = id_to_node[node_id]
+                raise ScannerError(
+                    f'Node ID collision: "{node_id}" produced by both '
+                    f'"{existing["path"]}" and "{rel_path}". '
+                    f"Rename one or split into distinct scan entries."
                 )
-                node_ids.add(node_id)
-            parsed_files.append((md_file, sdcoh_meta))
+            mtime = datetime.fromtimestamp(
+                md_file.stat().st_mtime, tz=timezone.utc
+            ).isoformat()
+            node = {
+                "id": node_id,
+                "type": entry.type,
+                "path": rel_path,
+                "mtime": mtime,
+            }
+            id_to_node[node_id] = node
+            path_to_node[rel_path] = node
+            result.nodes.append(node)
 
-    # Pass 2: build edges with pattern expansion
-    for md_file, sdcoh_meta in parsed_files:
-        node_id = sdcoh_meta["id"]
-        _build_edges(node_id, sdcoh_meta, node_ids, result)
+    # 2. Apply rules to build edges
+    # Deduplicate by (source, target); error on relation conflict.
+    edge_map: dict[tuple[str, str], dict] = {}
 
+    for rule in cfg.rules:
+        _validate_rule_placeholders(rule)
+        from_regex, capture_names = _compile_pattern(rule.from_pattern)
+        matched_any = False
+
+        for src_path, src_node in path_to_node.items():
+            m = from_regex.fullmatch(src_path)
+            if not m:
+                continue
+            captures = {name: m.group(name) for name in capture_names}
+            target_glob = _substitute_captures(rule.to_pattern, captures)
+            target_regex, _ = _compile_pattern(target_glob)
+
+            for tgt_path, tgt_node in path_to_node.items():
+                if tgt_path == src_path:
+                    continue
+                if not target_regex.fullmatch(tgt_path):
+                    continue
+                matched_any = True
+                key = (src_node["id"], tgt_node["id"])
+                if key in edge_map:
+                    existing = edge_map[key]
+                    if existing["relation"] != rule.relation:
+                        raise ScannerError(
+                            f'Relation conflict on edge '
+                            f'{src_node["id"]} → {tgt_node["id"]}: '
+                            f'"{existing["relation"]}" vs "{rule.relation}"'
+                        )
+                    continue
+                edge_map[key] = {
+                    "source": src_node["id"],
+                    "target": tgt_node["id"],
+                    "relation": rule.relation,
+                }
+
+        if not matched_any:
+            result.warnings.append(
+                f'rule "{rule.name}": no edges created'
+            )
+
+    result.edges = list(edge_map.values())
     return result
 
 
-def _expand_pattern(
-    pattern: str,
-    all_node_ids: set[str],
-    self_id: str,
-) -> list[str]:
-    """Expand a glob pattern against known node IDs.
+def _validate_rule_placeholders(rule: Rule) -> None:
+    """Ensure all {name} in `to` also appear in `from`."""
+    from_names = set(re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", rule.from_pattern))
+    to_names = set(re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", rule.to_pattern))
+    undefined = to_names - from_names
+    if undefined:
+        raise ScannerError(
+            f'Rule "{rule.name}": `to` references undefined placeholder(s): '
+            f'{", ".join(sorted(undefined))}'
+        )
 
-    If pattern contains no glob characters, returns [pattern] as-is.
-    Otherwise returns sorted matched IDs, excluding self_id.
+
+def _compile_pattern(pattern: str) -> tuple[re.Pattern[str], list[str]]:
+    """Compile a glob+capture pattern to a regex.
+
+    Syntax:
+        {name} → named capture (non-greedy, no slashes)
+        *      → [^/]*
+        ?      → [^/]
+        other  → escaped
+
+    Returns (compiled_regex, capture_names_in_order).
     """
-    if not any(c in pattern for c in ("*", "?", "[")):
-        return [pattern]
-    return sorted(
-        nid for nid in all_node_ids
-        if fnmatch(nid, pattern) and nid != self_id
-    )
+    capture_names: list[str] = []
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "{":
+            end = pattern.find("}", i)
+            if end == -1:
+                raise ScannerError(f"Unclosed {{ in pattern: {pattern!r}")
+            name = pattern[i + 1:end]
+            if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", name):
+                raise ScannerError(
+                    f"Invalid placeholder name {name!r} in pattern: {pattern!r}"
+                )
+            capture_names.append(name)
+            out.append(f"(?P<{name}>[^/]+?)")
+            i = end + 1
+        elif c == "*":
+            out.append("[^/]*")
+            i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("".join(out)), capture_names
 
 
-def _parse_frontmatter(
-    md_file: Path, root: Path, result: ScanResult
-) -> dict | None:
-    """Parse frontmatter and return sdcoh metadata, or None."""
-    rel_path = str(md_file.relative_to(root))
-    try:
-        post = frontmatter.load(str(md_file))
-    except Exception as e:
-        result.warnings.append(f"{rel_path} (parse error: {e})")
-        return None
-    sdcoh_meta = post.metadata.get("sdcoh")
-    if sdcoh_meta is None:
-        result.warnings.append(rel_path)
-        return None
-    return sdcoh_meta
+def _substitute_captures(pattern: str, captures: dict[str, str]) -> str:
+    """Replace {name} in pattern with captured values."""
+    def repl(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name not in captures:
+            raise ScannerError(f"Undefined placeholder {{{name}}}")
+        return captures[name]
 
-
-def _build_edges(
-    node_id: str,
-    sdcoh_meta: dict,
-    all_node_ids: set[str],
-    result: ScanResult,
-) -> None:
-    """Build edges from depends_on and updates, expanding glob patterns."""
-    for dep in sdcoh_meta.get("depends_on", []):
-        targets = _expand_pattern(dep["id"], all_node_ids, node_id)
-        if not targets and any(c in dep["id"] for c in ("*", "?", "[")):
-            result.warnings.append(
-                f'{node_id}: pattern "{dep["id"]}" matched 0 nodes'
-            )
-        for target_id in targets:
-            result.edges.append(
-                {
-                    "source": node_id,
-                    "target": target_id,
-                    "relation": dep["relation"],
-                    "direction": "depends_on",
-                }
-            )
-
-    for upd in sdcoh_meta.get("updates", []):
-        targets = _expand_pattern(upd["id"], all_node_ids, node_id)
-        if not targets and any(c in upd["id"] for c in ("*", "?", "[")):
-            result.warnings.append(
-                f'{node_id}: pattern "{upd["id"]}" matched 0 nodes'
-            )
-        for target_id in targets:
-            result.edges.append(
-                {
-                    "source": node_id,
-                    "target": target_id,
-                    "relation": upd["relation"],
-                    "direction": "updates",
-                }
-            )
+    return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", repl, pattern)

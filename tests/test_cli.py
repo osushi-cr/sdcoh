@@ -13,14 +13,16 @@ def test_cli_init(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert (tmp_path / "sdcoh.yml").exists()
     assert "Created" in result.output
+    # Template should include rules section
+    yml = (tmp_path / "sdcoh.yml").read_text()
+    assert "rules:" in yml
+    assert "scan:" in yml
+    # Scan entries use new dict format
+    assert "path:" in yml and "type:" in yml
 
 
 def test_cli_scan(sample_project: Path) -> None:
     runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=sample_project) as td:
-        # Copy files (CliRunner changes cwd)
-        pass
-    # Use mix_stderr=False and invoke with obj
     result = runner.invoke(
         cli, ["scan", "--path", str(sample_project)], catch_exceptions=False
     )
@@ -30,7 +32,6 @@ def test_cli_scan(sample_project: Path) -> None:
 
 
 def test_cli_impact(sample_project: Path) -> None:
-    # First scan
     runner = CliRunner()
     runner.invoke(cli, ["scan", "--path", str(sample_project)], catch_exceptions=False)
     result = runner.invoke(
@@ -39,7 +40,7 @@ def test_cli_impact(sample_project: Path) -> None:
         catch_exceptions=False,
     )
     assert result.exit_code == 0
-    assert "beat-sheet" in result.output
+    assert "episode:ep01" in result.output
 
 
 def test_cli_status(sample_project: Path) -> None:
@@ -67,4 +68,26 @@ def test_cli_graph(sample_project: Path) -> None:
         cli, ["graph", "--path", str(sample_project)], catch_exceptions=False
     )
     assert result.exit_code == 0
+    assert "design:characters" in result.output
+
+
+def test_cli_load_graph_invalidates_old_version(sample_project: Path) -> None:
+    """A cache file with a stale version must be ignored and rebuilt."""
+    sdcoh_dir = sample_project / ".sdcoh"
+    sdcoh_dir.mkdir(exist_ok=True)
+    stale_cache = {
+        "version": "1.0",
+        "scanned_at": "2020-01-01T00:00:00+00:00",
+        "nodes": [{"id": "legacy", "type": "design", "path": "x.md", "mtime": "2020-01-01T00:00:00+00:00"}],
+        "edges": [],
+    }
+    (sdcoh_dir / "graph.json").write_text(json.dumps(stale_cache))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["graph", "--path", str(sample_project)], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    # Stale "legacy" node should NOT appear — cache was rebuilt
+    assert "legacy" not in result.output
     assert "design:characters" in result.output
